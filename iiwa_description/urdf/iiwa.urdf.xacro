@@ -156,24 +156,33 @@
   </link>
   <link name="${prefix}link_7">
       <visual>
-        <origin rpy="0 0 0" xyz="0 0 0.07"/>
+        <origin rpy="0 0 0" xyz="0 0 0.081"/>
         <material name="gray"/>
         <geometry>
-          <mesh filename="file://$(find iiwa_description)/meshes/lbr_iiwa_14_r820/visual/link_7_2.stl" scale ="0.001 0.001 0.001"/>
+          <mesh filename="file://$(find iiwa_description)/meshes/lbr_iiwa_14_r820/visual/link_7_kroshu.stl"/>
         </geometry>
       </visual>
       <collision>
-        <origin rpy="0 0 0" xyz="0 0 0.07"/>
+        <origin rpy="0 0 0" xyz="0 0 0.081"/>
         <geometry>
-          <mesh filename="file://$(find iiwa_description)/meshes/lbr_iiwa_14_r820/collision/link_7_2.stl" scale ="0.001 0.001 0.001"/>
+          <mesh filename="file://$(find iiwa_description)/meshes/lbr_iiwa_14_r820/collision/link_7_kroshu.stl"/>
         </geometry>
       </collision>
       <inertial>
         <origin xyz="0 0 0.02" rpy="0 0 0"/>
-        <mass value="${0.3 / 0.308 * 0.44}"/> <!--this is for the MFT Pneumatisch flange-->
+        <mass value="${0.3 / 0.308 * 0.44}"/> <!-- Legacy approximate inertia; not identified for this flange. -->
         <inertia ixx="0.01"  ixy="0"  ixz="0" iyy="0.01" iyz="0" izz="0.01" />
       </inertial>
   </link>
+  <!-- Standard flange, expressed in the original iiwa_ros2 link_7 frame.
+       kroshu link_7 is translated by +0.081 m; flange/tool0 are another
+       +0.071 m along Z. -->
+  <link name="${prefix}flange"/>
+  <joint name="${prefix}link7-flange" type="fixed">
+      <origin rpy="0 0 0" xyz="0 0 0.152"/>
+      <parent link="${prefix}link_7"/>
+      <child link="${prefix}flange"/>
+  </joint>
   <link name="${prefix}tool0"/>
 
   <joint name="${prefix}joint_a1" type="revolute">
@@ -226,7 +235,7 @@
       <limit effort="40" lower="-3.0541" upper="3.0541" velocity="2.356"/>
   </joint>
   <joint name="${prefix}joint_a7-tool0" type="fixed">
-      <origin rpy="0 0 0" xyz="0 0 0.154"/>
+      <origin rpy="0 0 0" xyz="0 0 0.152"/>
       <parent link="${prefix}link_7"/>
       <child link="${prefix}tool0"/>
       <axis xyz="0 0 0"/>
