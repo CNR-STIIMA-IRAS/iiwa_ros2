@@ -179,9 +179,17 @@ CallbackReturn IiwaFRIHardwareInterface::on_activate(const rclcpp_lifecycle::Sta
     rclcpp::get_logger(
       "IiwaFRIHardwareInterface"), "Connecting FRI to port= %i and ip= %s", p_port, p_ip.c_str());
 
-  robotClient_.connect(p_port, p_ip.c_str());
+  if (!robotClient_.connect(p_port, p_ip.c_str())) {
+    RCLCPP_ERROR(
+      rclcpp::get_logger("IiwaFRIHardwareInterface"),
+      "Failed to open FRI UDP connection on port %i for controller %s",
+      p_port, p_ip.c_str());
+    return CallbackReturn::ERROR;
+  }
 
-  RCLCPP_INFO(rclcpp::get_logger("IiwaFRIHardwareInterface"), "System Successfully started!");
+  RCLCPP_INFO(
+    rclcpp::get_logger("IiwaFRIHardwareInterface"),
+    "FRI UDP socket opened; waiting for robot monitoring packets.");
 
   return CallbackReturn::SUCCESS;
 }

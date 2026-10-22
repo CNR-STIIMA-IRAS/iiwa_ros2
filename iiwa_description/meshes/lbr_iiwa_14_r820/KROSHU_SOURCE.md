@@ -8,7 +8,9 @@ Copyright 2025 KUKA Hungaria Kft. Apache-2.0; see KROSHU_LICENSE.
 
 The iiwa_ros2 link_7 frame is 81 mm below the kroshu link_7 frame.
 The mesh origin is therefore translated by +0.081 m in Z.
-The flange and tool0 frames are at +0.152 m (0.081 + 0.071) with no rotation.
+The flange and tool0 frames are at the distal face of the visual mesh:
++0.126 m (0.081 + 0.045) with no rotation. This intentionally differs from
+the upstream kroshu tool frame, which is 26 mm beyond the mesh face.
 This replaces the MFT pneumatic flange, whose tool0 was at +0.154 m.
 Arm joint origins, limits, hardware interfaces and other link meshes are unchanged.
 The original link_7 inertial values remain approximate and have not been

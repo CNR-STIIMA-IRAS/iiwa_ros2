@@ -175,11 +175,11 @@
       </inertial>
   </link>
   <!-- Standard flange, expressed in the original iiwa_ros2 link_7 frame.
-       kroshu link_7 is translated by +0.081 m; flange/tool0 are another
-       +0.071 m along Z. -->
+       The mesh origin is translated by +0.081 m; its distal face is
+       another +0.045 m along Z, so flange/tool0 are at +0.126 m. -->
   <link name="${prefix}flange"/>
   <joint name="${prefix}link7-flange" type="fixed">
-      <origin rpy="0 0 0" xyz="0 0 0.152"/>
+      <origin rpy="0 0 0" xyz="0 0 0.126"/>
       <parent link="${prefix}link_7"/>
       <child link="${prefix}flange"/>
   </joint>
@@ -235,7 +235,7 @@
       <limit effort="40" lower="-3.0541" upper="3.0541" velocity="2.356"/>
   </joint>
   <joint name="${prefix}joint_a7-tool0" type="fixed">
-      <origin rpy="0 0 0" xyz="0 0 0.152"/>
+      <origin rpy="0 0 0" xyz="0 0 0.126"/>
       <parent link="${prefix}link_7"/>
       <child link="${prefix}tool0"/>
       <axis xyz="0 0 0"/>

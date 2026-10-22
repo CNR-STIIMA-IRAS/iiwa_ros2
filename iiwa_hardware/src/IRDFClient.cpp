@@ -23,6 +23,7 @@ IRDFClient::IRDFClient():
       _trq_filter_cutoff(TRQ_FILTER_CUTOFF),
       _isTargetUpdated(false)
 {
+    _currentState = IDLE;
     _prev_q = VectorNJd::Zero();
     for(int i=0;i<NUMBER_OF_JOINTS;i++){
         _iiwaStatus.targetJointTorque[i] = 0;
@@ -63,7 +64,11 @@ void IRDFClient::setTorqueFilterCutOffFreq(double tff){
 }
 //******************************************************************************
 void IRDFClient::monitor(){
-    updateRobotStatus();
+    // Mirror commanded positions even while connection quality is settling,
+    // as required by the SDK's MONITORING_WAIT callback. Defer filtering
+    // until monitoring is ready, as before.
+    if (_currentState != MONITORING_WAIT)
+        updateRobotStatus();
     _robotCommand.setJointPosition(_robotState.getCommandedJointPosition());
 }
 //******************************************************************************
@@ -251,10 +256,8 @@ bool IRDFClient::updateFromRobot(){
       onStateChange(_data->lastState, _currentState);
       _data->lastState = _currentState;
    }
-   if(_currentState!=MONITORING_WAIT)
-      monitor();
-
    if (_currentState == IDLE) return false;
+   monitor();
     return true;
 }
 //******************************************************************************
