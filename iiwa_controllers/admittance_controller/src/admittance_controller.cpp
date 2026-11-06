@@ -1,263 +1,252 @@
-// Copyright 2022, ICube Laboratory, University of Strasbourg
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
+// Copyright 2022 ICube Laboratory, University of Strasbourg
+// Copyright 2026 CNR-STIIMA
+// SPDX-License-Identifier: Apache-2.0
 #include "admittance_controller/admittance_controller.hpp"
-
 #include <algorithm>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include "rclcpp/logging.hpp"
-#include "rclcpp/qos.hpp"
-
-#include "hardware_interface/loaned_command_interface.hpp"
-#include "hardware_interface/types/hardware_interface_type_values.hpp"
-
-namespace admittance_controller
-{
-using hardware_interface::LoanedCommandInterface;
-
-AdmittanceController::AdmittanceController()
-: controller_interface::ControllerInterface(),
-  rt_command_ptr_(nullptr),
-  joints_command_subscriber_(nullptr)
-{
-}
-
-controller_interface::return_type AdmittanceController::init(
-  const std::string & controller_name)
-{
-  auto ret = ControllerInterface::init(controller_name);
-  if (ret != controller_interface::return_type::OK) {
-    return ret;
-  }
-
-  try {
-    // definition of the parameters that need to be queried from the
-    // controller configuration file with default values
-    auto_declare<std::vector<std::string>>("joints", std::vector<std::string>());
-    auto_declare<std::vector<double>>("stiffness", std::vector<double>());
-    auto_declare<std::vector<double>>("damping", std::vector<double>());
-    auto_declare<std::vector<double>>("mass", std::vector<double>());
-    auto_declare<std::string>("sensor_name", "");
-  } catch (const std::exception & e) {
-    fprintf(stderr, "Exception thrown during init stage with message: %s \n", e.what());
-    return controller_interface::return_type::ERROR;
-  }
-
-  return controller_interface::return_type::OK;
-}
-
-CallbackReturn AdmittanceController::on_configure(
-  const rclcpp_lifecycle::State & /*previous_state*/)
-{
-  // getting the names of the joints to be controlled
-  joint_names_ = get_node()->get_parameter("joints").as_string_array();
-
-  if (joint_names_.empty()) {
-    RCLCPP_ERROR(get_node()->get_logger(), "'joints' parameter was empty");
-    return CallbackReturn::FAILURE;
-  }
-  // getting the admittance parameters
-
-  // TODO (mcbed): define damping from damping ratio
-  stiffness_ = get_node()->get_parameter("stiffness").as_double_array();
-  damping_ = get_node()->get_parameter("damping").as_double_array();
-  mass_ = get_node()->get_parameter("mass").as_double_array();
-
-  if (stiffness_.empty()) {
-    stiffness_.resize(joint_names_.size(), 50.0);
-  }
-  if (damping_.empty()) {
-    damping_.resize(joint_names_.size(), 10.0);
-  }
-  if (mass_.empty()) {
-    mass_.resize(joint_names_.size(), 0.0);
-  }
-
-  if ((stiffness_.size() != damping_.size()) || (stiffness_.size() != mass_.size())) {
-    RCLCPP_ERROR(get_node()->get_logger(), "incoherent size of admittance parameters");
-    return CallbackReturn::FAILURE;
-  }
-
-  for (auto i = 0ul; i < stiffness_.size(); i++) {
-    if (stiffness_[i] < 0 || damping_[i] < 0 || mass_[i] < 0) {
-      RCLCPP_ERROR(get_node()->get_logger(), "wrong admittance parameters");
-      return CallbackReturn::FAILURE;
-    }
-  }
-
-  sensor_name_ = get_node()->get_parameter("sensor_name").as_string();
-  if (sensor_name_.empty()) {
-    RCLCPP_ERROR(get_node()->get_logger(), "'sensor_name' parameter has to be specified.");
-    return CallbackReturn::FAILURE;
-  } else {
-    external_torque_sensor_ = std::make_unique<semantic_components::ExternalTorqueSensor>(
-      semantic_components::ExternalTorqueSensor(sensor_name_));
-  }
-  // the desired position of the proxy point are queried from the proxy topic
-  // and passed to update via a rt pipe
-  joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
-    "~/proxy", rclcpp::SystemDefaultsQoS(),
-    [this](const CmdType::SharedPtr msg) {rt_command_ptr_.writeFromNonRT(msg);});
-
-  RCLCPP_INFO(get_node()->get_logger(), "configure successful");
-  return CallbackReturn::SUCCESS;
-}
-// As admittance control targets the position or velocity interface.
-controller_interface::InterfaceConfiguration
-AdmittanceController::command_interface_configuration() const
-{
-  // TODO (mcbed): choose position or velocity command interface
-  controller_interface::InterfaceConfiguration conf;
-  conf.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-  conf.names.reserve(joint_names_.size());
-  for (const auto & joint_name : joint_names_) {
-    conf.names.push_back(joint_name + "/" + hardware_interface::HW_IF_POSITION);
-  }
-  return conf;
-}
-// Admittance control requires both velocity and position states, as well as
-// interaction force sesning. For this reason there can be directly defined here
-// without the need of getting as parameters.
-// The state interfaces are then deployed to all targeted joints.
-controller_interface::InterfaceConfiguration
-AdmittanceController::state_interface_configuration() const
-{
-  controller_interface::InterfaceConfiguration conf;
-  conf.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-  auto sensor_state_names = external_torque_sensor_->get_state_interface_names();
-  conf.names.reserve(joint_names_.size() * 2 + sensor_state_names.size());
-  for (const auto & joint_name : joint_names_) {
-    conf.names.push_back(joint_name + "/" + hardware_interface::HW_IF_POSITION);
-    conf.names.push_back(joint_name + "/" + hardware_interface::HW_IF_VELOCITY);
-  }
-  for (const auto & sensor_name : sensor_state_names) {
-    conf.names.push_back(sensor_name);
-  }
-
-  return conf;
-}
-
-// Fill ordered_interfaces with references to the matching interfaces
-// in the same order as in joint_names
-template<typename T>
-bool get_ordered_interfaces(
-  std::vector<T> & unordered_interfaces, const std::vector<std::string> & joint_names,
-  const std::string & interface_type, std::vector<std::reference_wrapper<T>> & ordered_interfaces)
-{
-  for (const auto & joint_name : joint_names) {
-    for (auto & command_interface : unordered_interfaces) {
-      if (
-        (command_interface.get_name() == joint_name) &&
-        (command_interface.get_interface_name() == interface_type))
-      {
-        ordered_interfaces.push_back(std::ref(command_interface));
-      }
-    }
-  }
-
-  return joint_names.size() == ordered_interfaces.size();
-}
-
-CallbackReturn AdmittanceController::on_activate(
-  const rclcpp_lifecycle::State & /*previous_state*/)
-{
-  std::vector<std::reference_wrapper<LoanedCommandInterface>> ordered_interfaces;
-  if (
-    !get_ordered_interfaces(
-      command_interfaces_, joint_names_, hardware_interface::HW_IF_EFFORT, ordered_interfaces) ||
-    command_interfaces_.size() != ordered_interfaces.size())
-  {
-    RCLCPP_ERROR(
-      get_node()->get_logger(), "Expected %zu position command interfaces, got %zu",
-      joint_names_.size(),
-      ordered_interfaces.size());
-    return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::ERROR;
-  }
-  external_torque_sensor_->assign_loaned_state_interfaces(state_interfaces_);
-
-  return CallbackReturn::SUCCESS;
-}
-// When deactivating the controller, the effort command on all joints is set to 0
-CallbackReturn AdmittanceController::on_deactivate(
-  const rclcpp_lifecycle::State & /*previous_state*/)
-{
-  // TODO(mcbed): only if velocity command
-  for (auto index = 0ul; index < joint_names_.size(); ++index) {
-    command_interfaces_[index].set_value(0.0);
-  }
-
-  external_torque_sensor_->release_interfaces();
-
-  return CallbackReturn::SUCCESS;
-}
-// main control loop function getting the state interface and writing to the command interface
-controller_interface::return_type AdmittanceController::update()
-{
-  // getting the data from the subscriber using the rt pipe
-  auto proxy = rt_command_ptr_.readFromRT();
-
-  // no command received yet
-  if (!proxy || !(*proxy)) {
-    return controller_interface::return_type::OK;
-  }
-
-  //checking proxy data validity
-  if ((*proxy)->joint_names.size() != joint_names_.size() ||
-    (*proxy)->points[0].positions.size() != joint_names_.size())
-  {
-    RCLCPP_ERROR_THROTTLE(
-      get_node()->get_logger(),
-      *get_node()->get_clock(), 1000, "command size does not match number of interfaces");
-    return controller_interface::return_type::ERROR;
-  }
-
-  auto sensor_data = external_torque_sensor_->get_torques();
-  std::vector<double> external_torques(sensor_data.begin(), sensor_data.end());
-  //Admittance control loop
-  for (auto index = 0ul; index < joint_names_.size(); ++index) {
-    // the stats are given in the same order as defines in state_interface_configuration
-
-    double q = state_interfaces_[2 * index].get_value();
-    double qv = state_interfaces_[2 * index + 1].get_value();
-    double qd = (*proxy)->points[0].positions[index];
-
-    double qdv = 0;
-    if ((*proxy)->points[0].velocities.size() == joint_names_.size()) {
-      qdv = (*proxy)->points[0].velocities[index];
-    }
-
-    double qda = 0;
-    if ((*proxy)->points[0].accelerations.size() == joint_names_.size()) {
-      qda = (*proxy)->points[0].accelerations[index];
-    }
-
-    double u = qda + 1 / mass_[index] *
-      (stiffness_[index] * (qd - q) + damping_[index] * (qdv - qv) + external_torques[index]);
-    // TODO (mcbed): simple or double integration for position or velocity interface
-    command_interfaces_[index].set_value(internal_position_[index]);
-
-  }
-
-  return controller_interface::return_type::OK;
-}
-
-}  // namespace admittance_controller
-
+#include <cmath>
+#include <set>
+#include <stdexcept>
+#include "kdl/tree.hpp"
+#include "kdl_parser/kdl_parser.hpp"
 #include "pluginlib/class_list_macros.hpp"
 
-PLUGINLIB_EXPORT_CLASS(
-  admittance_controller::AdmittanceController, controller_interface::ControllerInterface)
+namespace iiwa_joint_admittance_controller
+{
+CallbackReturn JointAdmittanceController::on_init()
+{
+  try {
+    auto_declare<std::vector<std::string>>("joints", {});
+    auto_declare<std::vector<std::string>>("torque_interfaces", {});
+    for (const auto * name : {"mass", "damping", "stiffness", "torque_deadband",
+      "joint_lower_limits", "joint_upper_limits", "max_velocity", "max_acceleration"}) {
+      auto_declare<std::vector<double>>(name, {});
+    }
+    auto_declare<double>("filter_time_constant", 0.05);
+    auto_declare<double>("max_period", 0.02);
+    auto_declare<double>("max_tracking_error", 0.1);
+    auto_declare<double>("payload_mass", 0.0);
+    auto_declare<std::vector<double>>("payload_com", {0.0, 0.0, 0.0});
+    auto_declare<std::string>("payload_frame", "");
+    auto_declare<std::string>("gravity_frame", "world");
+    auto_declare<std::vector<double>>("gravity", {0.0, 0.0, -9.81});
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(get_node()->get_logger(), "%s", e.what());
+    return CallbackReturn::ERROR;
+  }
+  return CallbackReturn::SUCCESS;
+}
+
+CallbackReturn JointAdmittanceController::on_configure(const rclcpp_lifecycle::State &)
+{
+  try {
+    joints_ = get_node()->get_parameter("joints").as_string_array();
+    torque_names_ = get_node()->get_parameter("torque_interfaces").as_string_array();
+    if (joints_.size() != 7 || torque_names_.size() != joints_.size() ||
+      std::set<std::string>(joints_.begin(), joints_.end()).size() != joints_.size() ||
+      std::set<std::string>(torque_names_.begin(), torque_names_.end()).size() != joints_.size()) {
+      throw std::runtime_error("Specify seven unique joints and seven matching torque_interfaces");
+    }
+    auto read = [this](const char * name, std::vector<double> & values, bool positive) {
+      values = get_node()->get_parameter(name).as_double_array();
+      if (values.size() != joints_.size()) {throw std::runtime_error(std::string(name) + ": expected seven values");}
+      for (double v : values) {
+        if (!std::isfinite(v) || (positive ? v <= 0.0 : v < 0.0)) {
+          throw std::runtime_error(std::string(name) + ": invalid value");
+        }
+      }
+    };
+    read("mass", mass_, true);
+    read("damping", damping_, true);
+    read("stiffness", stiffness_, false);
+    read("torque_deadband", deadband_, false);
+    read("max_velocity", max_velocity_, true);
+    read("max_acceleration", max_acceleration_, true);
+    lower_ = get_node()->get_parameter("joint_lower_limits").as_double_array();
+    upper_ = get_node()->get_parameter("joint_upper_limits").as_double_array();
+    if (lower_.size() != joints_.size() || upper_.size() != joints_.size()) {
+      throw std::runtime_error("Specify seven lower and upper joint limits");
+    }
+    for (size_t i = 0; i < joints_.size(); ++i) {
+      if (!std::isfinite(lower_[i]) || !std::isfinite(upper_[i]) || lower_[i] >= upper_[i]) {
+        throw std::runtime_error("Invalid joint limits");
+      }
+    }
+    filter_time_constant_ = get_node()->get_parameter("filter_time_constant").as_double();
+    max_period_ = get_node()->get_parameter("max_period").as_double();
+    max_tracking_error_ = get_node()->get_parameter("max_tracking_error").as_double();
+    if (!std::isfinite(filter_time_constant_) || filter_time_constant_ < 0 ||
+      !std::isfinite(max_period_) || max_period_ <= 0 ||
+      !std::isfinite(max_tracking_error_) || max_tracking_error_ <= 0) {
+      throw std::runtime_error("Invalid filter or watchdog parameters");
+    }
+    position_.resize(7); velocity_.resize(7); reference_.resize(7); filtered_torque_.resize(7);
+    payload_torque_.assign(7, 0.0);
+    if (!configure_payload()) {return CallbackReturn::ERROR;}
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(get_node()->get_logger(), "%s", e.what());
+    return CallbackReturn::ERROR;
+  }
+  return CallbackReturn::SUCCESS;
+}
+
+bool JointAdmittanceController::configure_payload()
+{
+  auto node = get_node();
+  payload_mass_ = node->get_parameter("payload_mass").as_double();
+  const auto com = node->get_parameter("payload_com").as_double_array();
+  const auto gravity = node->get_parameter("gravity").as_double_array();
+  if (!std::isfinite(payload_mass_) || payload_mass_ < 0 || com.size() != 3 || gravity.size() != 3 ||
+    !std::all_of(com.begin(), com.end(), [](double v) {return std::isfinite(v);}) ||
+    !std::all_of(gravity.begin(), gravity.end(), [](double v) {return std::isfinite(v);})) {
+    throw std::runtime_error("payload_mass must be >= 0; payload_com and gravity need three values");
+  }
+  if (payload_mass_ == 0.0) {
+    fk_solver_.reset(); jac_solver_.reset();
+    return true;
+  }
+  payload_com_ = KDL::Vector(com[0], com[1], com[2]);
+  payload_weight_ = payload_mass_ * KDL::Vector(gravity[0], gravity[1], gravity[2]);
+  const auto root = node->get_parameter("gravity_frame").as_string();
+  const auto tip = node->get_parameter("payload_frame").as_string();
+  if (root.empty() || tip.empty()) {throw std::runtime_error("Specify gravity_frame and payload_frame");}
+
+  // Jazzy supplies the same URDF used by controller_manager directly to controllers.
+  const auto & description = get_robot_description();
+  KDL::Tree tree;
+  if (!kdl_parser::treeFromString(description, tree) || !tree.getChain(root, tip, chain_)) {
+    throw std::runtime_error("Cannot build a KDL chain from " + root + " to " + tip);
+  }
+  chain_to_joint_.clear();
+  for (const auto & segment : chain_.segments) {
+    if (segment.getJoint().getType() == KDL::Joint::None) {continue;}
+    auto it = std::find(joints_.begin(), joints_.end(), segment.getJoint().getName());
+    if (it == joints_.end()) {
+      throw std::runtime_error("Chain joint " + segment.getJoint().getName() + " is not controlled");
+    }
+    chain_to_joint_.push_back(static_cast<size_t>(it - joints_.begin()));
+  }
+  if (chain_to_joint_.size() != joints_.size()) {
+    throw std::runtime_error("The chain to payload_frame must contain exactly the seven joints");
+  }
+  fk_solver_ = std::make_unique<KDL::ChainFkSolverPos_recursive>(chain_);
+  jac_solver_ = std::make_unique<KDL::ChainJntToJacSolver>(chain_);
+  chain_q_.resize(chain_.getNrOfJoints());
+  jacobian_.resize(chain_.getNrOfJoints());
+  RCLCPP_INFO(node->get_logger(), "Compensating %.3f kg payload on %s", payload_mass_, tip.c_str());
+  return true;
+}
+
+// tau = J_com^T * m*g: the joint torque the payload weight produces, which FRI reports as
+// external torque when the load is not declared on the KUKA side.
+void JointAdmittanceController::compute_payload_torque()
+{
+  if (!jac_solver_) {return;}
+  for (size_t c = 0; c < chain_to_joint_.size(); ++c) {
+    chain_q_(c) = state_interfaces_[position_index_[chain_to_joint_[c]]].get_value();
+  }
+  KDL::Frame tip;
+  fk_solver_->JntToCart(chain_q_, tip);
+  jac_solver_->JntToJac(chain_q_, jacobian_);
+  jacobian_.changeRefPoint(tip.M * payload_com_);
+  for (size_t c = 0; c < chain_to_joint_.size(); ++c) {
+    payload_torque_[chain_to_joint_[c]] = jacobian_(0, c) * payload_weight_.x() +
+      jacobian_(1, c) * payload_weight_.y() + jacobian_(2, c) * payload_weight_.z();
+  }
+}
+
+controller_interface::InterfaceConfiguration
+JointAdmittanceController::command_interface_configuration() const
+{
+  controller_interface::InterfaceConfiguration c;
+  c.type = controller_interface::interface_configuration_type::INDIVIDUAL;
+  for (const auto & joint : joints_) {c.names.push_back(joint + "/position");}
+  return c;
+}
+controller_interface::InterfaceConfiguration
+JointAdmittanceController::state_interface_configuration() const
+{
+  controller_interface::InterfaceConfiguration c;
+  c.type = controller_interface::interface_configuration_type::INDIVIDUAL;
+  for (const auto & joint : joints_) {c.names.push_back(joint + "/position");}
+  c.names.insert(c.names.end(), torque_names_.begin(), torque_names_.end());
+  return c;
+}
+
+CallbackReturn JointAdmittanceController::on_activate(const rclcpp_lifecycle::State &)
+{
+  command_index_.clear(); position_index_.clear(); torque_index_.clear();
+  auto find = [](const auto & interfaces, const std::string & name) {
+    for (size_t i = 0; i < interfaces.size(); ++i) {
+      if (interfaces[i].get_name() == name) {return i;}
+    }
+    throw std::runtime_error("Missing interface: " + name);
+  };
+  try {
+    for (size_t i = 0; i < joints_.size(); ++i) {
+      command_index_.push_back(find(command_interfaces_, joints_[i] + "/position"));
+      position_index_.push_back(find(state_interfaces_, joints_[i] + "/position"));
+      torque_index_.push_back(find(state_interfaces_, torque_names_[i]));
+      double q = state_interfaces_[position_index_[i]].get_value();
+      double tau = state_interfaces_[torque_index_[i]].get_value();
+      if (!std::isfinite(q) || !std::isfinite(tau) || q < lower_[i] || q > upper_[i]) {
+        throw std::runtime_error("Invalid initial position or torque");
+      }
+      reference_[i] = position_[i] = q;
+      velocity_[i] = filtered_torque_[i] = 0.0;
+    }
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(get_node()->get_logger(), "%s", e.what());
+    return CallbackReturn::ERROR;
+  }
+  for (size_t i = 0; i < joints_.size(); ++i) {
+    command_interfaces_[command_index_[i]].set_value(position_[i]);
+  }
+  return CallbackReturn::SUCCESS;
+}
+
+CallbackReturn JointAdmittanceController::on_deactivate(const rclcpp_lifecycle::State &)
+{
+  // Keep the last bounded position command; never send zero on a position interface.
+  std::fill(velocity_.begin(), velocity_.end(), 0.0);
+  return CallbackReturn::SUCCESS;
+}
+
+controller_interface::return_type JointAdmittanceController::update(
+  const rclcpp::Time &, const rclcpp::Duration & period)
+{
+  const double dt = period.seconds();
+  bool valid = std::isfinite(dt) && dt > 0 && dt <= max_period_;
+  // Validate all samples before writing any command. On fault retain the last command.
+  for (size_t i = 0; i < joints_.size(); ++i) {
+    const double q = state_interfaces_[position_index_[i]].get_value();
+    const double tau = state_interfaces_[torque_index_[i]].get_value();
+    valid = valid && std::isfinite(q) && std::isfinite(tau) &&
+      q >= lower_[i] && q <= upper_[i] && std::abs(q - position_[i]) <= max_tracking_error_;
+  }
+  if (!valid) {
+    std::fill(velocity_.begin(), velocity_.end(), 0.0);
+    return controller_interface::return_type::ERROR;
+  }
+  const double alpha = filter_time_constant_ == 0 ? 1.0 : -std::expm1(-dt / filter_time_constant_);
+  compute_payload_torque();
+  for (size_t i = 0; i < joints_.size(); ++i) {
+    const double tau = state_interfaces_[torque_index_[i]].get_value() - payload_torque_[i];
+    filtered_torque_[i] += alpha * (tau - filtered_torque_[i]);
+    const double force = std::copysign(std::max(0.0, std::abs(filtered_torque_[i]) - deadband_[i]), filtered_torque_[i]);
+    const double drive = force + stiffness_[i] * (reference_[i] - position_[i]);
+    // Exact velocity solution for constant drive over one cycle; stable for positive damping.
+    const double target_velocity = drive / damping_[i] +
+      (velocity_[i] - drive / damping_[i]) * std::exp(-damping_[i] * dt / mass_[i]);
+    const double dv = std::clamp(target_velocity - velocity_[i],
+      -max_acceleration_[i] * dt, max_acceleration_[i] * dt);
+    velocity_[i] = std::clamp(velocity_[i] + dv, -max_velocity_[i], max_velocity_[i]);
+    const double next = position_[i] + dt * velocity_[i];
+    position_[i] = std::clamp(next, lower_[i], upper_[i]);
+    if (position_[i] != next) {velocity_[i] = 0;}
+    command_interfaces_[command_index_[i]].set_value(position_[i]);
+  }
+  return controller_interface::return_type::OK;
+}
+}
+PLUGINLIB_EXPORT_CLASS(iiwa_joint_admittance_controller::JointAdmittanceController,
+  controller_interface::ControllerInterface)

@@ -1,7 +1,7 @@
-<library path="admittance_controller">
-  <class name="admittance_controller/AdmittanceController" type="admittance_controller::AdmittanceController" base_class_type="controller_interface::ControllerInterface">
-  <description>
-    The admittance controller commands a group of joints through the position or velocity interface. It requires interaction force sensor data.
-  </description>
+<library path="iiwa_joint_admittance_controller">
+  <class name="iiwa_joint_admittance_controller/JointAdmittanceController"
+         type="iiwa_joint_admittance_controller::JointAdmittanceController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>Position-command joint admittance using iiwa external torques.</description>
   </class>
 </library>
